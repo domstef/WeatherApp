@@ -1,0 +1,288 @@
+#!/bin/bash
+
+# Loading data from config file
+source config.rc
+
+# Verbose flag for turning on/off a mode
+verbose=false
+
+
+# Help function with instructions about parameters
+Help() {
+
+   echo "Script displays weather information recieved from the nearest station."
+   echo
+   echo "Syntax: weather [-c|h|v]"
+   echo "options:"
+   echo "c     Print the weather data for given city."
+   echo "h     Print Help."
+   echo "v     Verbose mode."
+   echo
+}
+
+
+
+# Creating directory and cache file for storing weather stations data
+local_memory_file="/home/students/s492412/.cache/mymeteo/cities.txt"
+if [ ! -d "~/.cache/mymeteo/" ]
+then
+    mkdir -p ~/.cache/mymeteo/
+fi
+
+if [ ! -f "~/.cache/mymeteo/cities.txt" ]
+then
+    touch "/home/students/s492412/.cache/mymeteo/cities.txt"
+fi
+
+
+url_stations="https://danepubliczne.imgw.pl/api/data/synop"
+json_stat="$(wget -qO- "$url_stations")"
+
+# Function displays latitude and longitude of a given city.
+# If function founds a city in memory file, it retrieves information about this city
+# If not, it connects with API and asks for lat and lon.
+displayLat () {
+    local city=$1
+    if [ -f "$local_memory_file" ]
+    then
+        echo "Searching in local memory..."
+        local file="$local_memory_file"
+
+        if grep -q $city $local_memory_file;then
+            echo "City found!"
+            lat_len=$(grep $city $local_memory_file | cut -d';' -f2-)
+            lat=$(echo $lat_len | cut -d';' -f1-2)
+            lon=$(echo $lat_len | cut -d';' -f2-)
+        else
+            echo "Searching in API..."
+            city="${city// /}"
+            city="${city,,}"
+
+        # Polish signs
+        city=$(echo "$city" | sed 's/ą/a/g; s/ć/c/g; s/ę/e/g; s/ł/l/g; s/ń/n/g; s/ó/o/g; s/ś/s/g; s/ź/z/g; s/ż/z/g')
+
+            url_nominatim="http://nominatim.openstreetmap.org/search?format=json&city=$city"
+            json_nom="$(wget -qO- "$url_nominatim")"
+            lat=$(echo $json_nom|jq -r ."[0]|(.lat)")
+            lon=$(echo $json_nom|jq -r ."[0]|(.lon)")
+            echo "$city;$lat;$lon">> $local_memory_file
+        fi
+        echo "It is lat ${lat} and lon ${lon}"
+
+    else
+        echo "Wrong data"
+    fi
+}
+
+# Function loads data from weather database and returns its names. 
+# It is used only once, when there is a need of loading info into memory file. 
+loadStations () {
+   
+    stat_str=$(echo $json_stat|jq ". | length")
+    stat_num=$(expr "$stat_str" + 0)
+    echo "We have "$stat_num" stations!"
+    for row in $(echo "${json_stat}" | jq -r '.[] | @base64'); do
+        _jq() {
+         echo ${row} | base64 --decode | jq -r ${1}
+        }
+       displayLat "$(_jq '.stacja')"
+    done
+     
+}
+
+
+# Calculations distance when two pairs of lat and lon are given
+distance () {
+    d=$( echo "(($3 - $1) * ($3 - $1) + ($4 - $2)*($4 - $2))" | bc -l)
+    echo "scale=4;sqrt($d)" | bc -l
+
+}
+
+# Function for checking if given city is in the cache file.
+cityAvaliable () {
+    if [ ! -f "$nearest_city_cache" ]; then
+        echo "1"
+        exit
+    fi
+    if [ "$(check_cache)" == "0" ]; then
+         #echo "Checking the nearest city in local memory..."
+         cat $nearest_city_cache | ( while read line 
+         do
+            if grep -q $my_city $nearest_city_cache;then
+            #echo "Retrieving the data from local memory...."
+            stat_min=$(grep $my_city $nearest_city_cache | cut -d';' -f2-) 
+            echo "0"
+            exit
+            fi
+                     
+         done
+         if [ -n $stat_min ]; then
+            echo "1"
+            exit
+         else
+            echo "0"
+            exit
+        fi
+        )
+    fi
+}
+
+# Finding the nearest station for given city. 
+# It checks cache file and if the studied city is inside it. 
+nearestStation () {
+      if [ "$(check_cache)" == "0" ] && [ "$(cityAvaliable)" == "0" ]; then
+         echo "Checking the nearest city in local memory..."
+         cat $nearest_city_cache | ( while read line 
+         do
+            if grep -q $my_city $nearest_city_cache; then
+            echo "Retrieving the data from local memory...."
+            stat_min=$(grep $my_city $nearest_city_cache | cut -d';' -f2-) 
+            fi
+                     
+         done
+      
+          
+         id=$(findId $stat_min)
+      #echo "$id"
+      echoMeteo $id )
+         else
+
+
+          local min=$(distance $1 $2 53.1275 23.1470)
+          local stat_min="Białystok"
+          #echo $min
+          
+          local file="$local_memory_file"
+          cat $file | ( while read line 
+          do
+                city=$(echo $line | cut -d ';' -f1)
+                lat=$(echo $line | cut -d ';' -f2 | bc -l)
+                lon=$(echo $line | cut -d ';' -f3- | bc -l)
+                #echo $lat $lon
+                dist=$(distance $1 $2 $lat $lon)
+                #echo "Checking..."
+                #echo $city
+                
+                if  (( $(echo "$dist < $min" | bc -l) )); then
+
+                    min=$dist
+                    stat_min=$city
+                    #echo "New minimum $min"
+                
+                fi
+
+              
+          done 
+      echo "Saving city data in local memory..."
+      echo "$my_city;$stat_min" > "$nearest_city_cache"
+      id=$(findId $stat_min)
+      #echo "$id"
+      echoMeteo $id )
+      fi
+     
+}
+
+# Displaying information about the weather
+echoMeteo () {
+    echo "My station:"
+    #echo $1
+    id=$(findId $1)
+    #echo "My ID"
+    #echo $id
+
+    meteo_info="$(wget -qO- "https://danepubliczne.imgw.pl/api/data/synop/id/$1")"
+    #echo $meteo_info
+    city=$(echo $meteo_info| jq ".stacja")
+
+    data="$(echo $meteo_info | jq '.data_pomiaru'  | sed 's/\"//g')"
+    godzina="$(echo $meteo_info | jq '.godzina_pomiaru'  | sed 's/\"//g')"
+    temperatura="$(echo $meteo_info | jq '.temperatura'  | sed 's/\"//g')"
+    predkosc_wiatru="$(echo $meteo_info | jq '.predkosc_wiatru'  | sed 's/\"//g')"
+    kierunek_wiatru="$(echo $meteo_info | jq '.kierunek_wiatru'  | sed 's/\"//g')"
+    wilgotnosc_wzgl="$(echo $meteo_info | jq '.wilgotnosc_wzgledna'  | sed 's/\"//g')"
+    suma_opad="$(echo $meteo_info | jq '.suma_opadu'  | sed 's/\"//g')"
+    cisnienie="$(echo $meteo_info | jq '.cisnienie'  | sed 's/\"//g')"
+    echo "$city [$1] / $data $godzina:00"
+    echo "Temperatura: $temperatura °C"
+    echo "Prędkość wiatru: $predkosc_wiatru m/s"
+    echo "Kierunek wiatru:   $kierunek_wiatru °"
+    echo "Wilgotność wzgl.:   $wilgotnosc_wzgl %"
+    echo "Suma opadu:  $suma_opad mm"
+    echo "Ciśnienie:  $cisnienie hPa"
+
+
+}
+
+
+findId (){
+
+    id=$(echo "$json_stat" | jq -r --arg v1 "$1" '.[] | select(.stacja==$v1)'|jq -r '.id_stacji')
+
+    echo $id
+}
+
+# Function displays latitude and longitude of a city given as a parameter. 
+getMyCity (){
+	url_nominatim="http://nominatim.openstreetmap.org/search?format=json&city=$1"
+            json_nom="$(wget -qO- "$url_nominatim")"
+            echo "New data for $1"
+            my_lat=$(echo $json_nom|jq -r ."[0]|(.lat)")
+            my_len=$(echo $json_nom|jq -r ."[0]|(.lon)")
+	        
+}
+
+
+# Function checks if cache file is valid
+check_cache () {
+    if [ ! -f "$nearest_city_cache" ]; then
+        #echo "File does not exists"
+        echo "1"
+        exit
+    else 
+        #echo "File exists"
+        time=$(stat -c %Y "$nearest_city_cache")
+        if [ $((current_time - time)) -lt "$timeout" ]; then
+            echo "0"
+        else
+            echo "1"
+        fi
+  
+   fi
+
+   
+}
+
+
+
+while getopts ":c:v:h" option; do
+    case $option in
+        h)
+            Help
+            exit;;
+        c)
+            my_city="$OPTARG"
+            
+            ;;
+        v)
+            verbose=true
+            ;;
+
+
+            
+    esac
+done
+
+if [ "$verbose" = true ];then
+    set -x
+fi
+
+
+getMyCity $my_city
+#echo $my_lat $my_len
+#loadStations #function to save stations and lat,lon for every station
+nearestStation $my_lat $my_len 
+sleep 2
+
+if [ "$verbose" = true ];then
+    set +x
+fi

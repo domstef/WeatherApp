@@ -1,0 +1,3 @@
+timeout=3600
+nearest_city_cache="/home/students/s492412/.cache/mymeteo/nearest.txt"
+current_time=$(date +%s)
